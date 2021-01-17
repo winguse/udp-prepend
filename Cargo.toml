@@ -1,0 +1,16 @@
+[package]
+name = "udp-prepend"
+version = "0.1.0"
+authors = ["Yingyu Cheng <github@winguse.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4.8"
+chrono = "0.4.0"
+clap = "2.33.0"
+rand = "0.7.3"
+async-std = "1.6.5"
+async-stream = "0.3.0"
+futures = "0.3.5"
