@@ -1,20 +1,11 @@
-use std::borrow::{Borrow, BorrowMut};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::thread;
 use std::time::Duration;
 
-use async_std::future;
-use async_std::io;
-use async_std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use async_std::sync::{Arc, Mutex, RwLock};
+use async_std::net::SocketAddr;
 use async_std::task;
 use clap::*;
-use futures::executor::block_on;
-use log::{debug, error, info, warn, LevelFilter};
+use log::LevelFilter;
 
-use std::env::var;
 use udp_prepend::logger;
-use udp_prepend::logger::LOGGER;
 use udp_prepend::udp_prepend::{Mode, UdpPrepend};
 
 fn main() {
@@ -80,6 +71,6 @@ fn main() {
 
     task::block_on(async {
         let prepend = UdpPrepend::new(size, mode, bind, upstream, upstream_timeout).await;
-        prepend.start_forward();
+        prepend.start_forward().await;
     })
 }

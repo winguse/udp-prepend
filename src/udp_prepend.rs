@@ -1,28 +1,18 @@
-use std::borrow::{Borrow, BorrowMut};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::thread;
 use std::time::Duration;
 
-use async_std::future;
 use async_std::io;
-use async_std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
-use async_std::sync::{Arc, Mutex, RwLock};
+use async_std::net::{SocketAddr, UdpSocket};
+use async_std::sync::{Arc, RwLock};
 use async_std::task;
 use clap::*;
-use futures::executor::block_on;
-use log::{debug, error, info, warn, LevelFilter};
+use log::{error, warn};
 
-use crate::logger;
-use crate::logger::LOGGER;
-use std::str::FromStr;
-
-const BUFFER_SIZE: usize = 2048;
+const BUFFER_SIZE: usize = 65 << 10; // 65 KB, larger than the max possible udp package
 
 pub struct UpstreamInfo {
     id: u32,
     downstream_addr: SocketAddr,
     upstream_socket: UdpSocket,
-    last_active_ts: u64,
 }
 
 async fn info_recv(
@@ -43,37 +33,42 @@ async fn info_recv(
         .await
         {
             Err(e) => {
-                warn!("found receive from downstream #{} error: {}", info.id, e);
-                let mut w = infos.write().await;
-                let pos = w
-                    .iter()
-                    .position(|i| i.id == info.id)
-                    .expect("should find socket info");
-                w.remove(pos);
+                error!(
+                    "error while receiving from downstream #{} error: {}",
+                    info.id, e
+                );
                 break;
             }
             Ok((rev_size, _)) => {
                 for i in 0..recv_bg_pos {
                     buf[i] = buf[recv_bg_pos + rev_size - i - 1]
                 }
-                downstream_socket
+                match downstream_socket
                     .send_to(
                         &buf[send_bg_pos..recv_bg_pos + rev_size],
                         &info.downstream_addr,
                     )
-                    .await;
-                for i in 0..recv_bg_pos {
-                    buf[i] = buf[recv_bg_pos + rev_size - i - 1]
+                    .await
+                {
+                    Err(e) => {
+                        error!(
+                            "error while sending data to downstream #{} error: {}",
+                            info.id, e
+                        );
+                        break;
+                    }
+                    Ok(_) => {}
                 }
-                downstream_socket
-                    .send_to(
-                        &buf[send_bg_pos..recv_bg_pos + rev_size],
-                        &info.downstream_addr,
-                    )
-                    .await;
             }
         }
     }
+    // clean up: removing the current UpstreamInfo from infos
+    let mut writable_infos = infos.write().await;
+    let pos = writable_infos
+        .iter()
+        .position(|i| i.id == info.id)
+        .expect("should find socket info");
+    writable_infos.remove(pos);
 }
 
 pub enum Mode {
@@ -84,8 +79,8 @@ pub enum Mode {
 impl Mode {
     pub fn build_begin_position(&self, prepend_size: usize) -> (usize, usize) {
         match self {
-            Mode::Decode => (prepend_size, 0),
-            Mode::Encode => (0, prepend_size),
+            Mode::Encode => (prepend_size, 0),
+            Mode::Decode => (0, prepend_size),
         }
     }
     pub fn reverse(&self) -> Mode {
@@ -114,7 +109,6 @@ impl std::str::FromStr for Mode {
 pub struct UdpPrepend {
     prepend_size: usize,
     mode: Mode,
-    bind: SocketAddr,
     upstream: SocketAddr,
     upstream_timeout: Duration,
     downstream_socket: Arc<UdpSocket>,
@@ -135,7 +129,6 @@ impl UdpPrepend {
         UdpPrepend {
             prepend_size,
             mode,
-            bind,
             upstream,
             upstream_timeout,
             downstream_socket: Arc::new(downstream_socket),
@@ -158,8 +151,10 @@ impl UdpPrepend {
             }
 
             let existing_info = {
-                let read = &*self.upstream_infos.read().await;
-                read.iter()
+                self.upstream_infos
+                    .read()
+                    .await
+                    .iter()
                     .find(|&info| info.downstream_addr.eq(&downstream_addr))
                     .map(|i| i.clone())
             };
@@ -174,7 +169,6 @@ impl UdpPrepend {
                         id: info_id_counter,
                         downstream_addr,
                         upstream_socket,
-                        last_active_ts: 0,
                     });
                     info_id_counter += 1;
                     task::spawn(info_recv(
@@ -185,15 +179,21 @@ impl UdpPrepend {
                         self.prepend_size,
                         self.upstream_timeout,
                     ));
-                    let mut write = &mut *self.upstream_infos.write().await;
-                    write.push(info.clone());
+                    self.upstream_infos.write().await.push(info.clone());
                     info
                 }
             };
 
-            info.upstream_socket
+            match info
+                .upstream_socket
                 .send_to(&buf[send_bg_pos..recv_bg_pos + rev_size], &self.upstream)
-                .await;
+                .await
+            {
+                Err(e) => {
+                    warn!("error while sending data to upstream #{}: {}", info.id, e);
+                }
+                Ok(_) => {}
+            }
         }
     }
 }
